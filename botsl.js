@@ -32,7 +32,39 @@ function agendarReconexao(reason,delayMs){
  console.log(`[Auto-Reconectar] ${reason||'desconectado'}. Tentando reconectar em ${Math.round(tempo/1000)} segundos...`);
  reconnectTimer=setTimeout(()=>{ reconnectTimer=null; if(shuttingDown)return; try{ bot=new nmv.Bot(loginParameters,options); iniciarConexaoBot(); }catch(e){ console.error('Erro ao reiniciar instância do bot:',e.message||e); agendarReconexao('erro ao reiniciar instância: '+(e.message||e),tempo); } },tempo);
 }
-function makeLoginParameters(){ const p=new nmv.LoginParameters(); p.firstName=cfg.bot.firstName; p.lastName=cfg.bot.lastName; p.password=cfg.bot.password; p.start=cfg.bot.start||'last'; return p; }
+function normalizeStartLocation(raw){
+ const value=String(raw||'').trim();
+ if(!value)return 'last';
+ if(/^(last|home)$/i.test(value))return value.toLowerCase();
+ let region,x,y,z;
+ try{
+   const url=new URL(value);
+   const m=url.pathname.match(/\/secondlife\/([^\/]+)\/([0-9.]+)\/([0-9.]+)\/([0-9.]+)/i);
+   if(m){ region=decodeURIComponent(m[1]); x=m[2]; y=m[3]; z=m[4]; }
+ }catch(_){}
+ if(!region){
+   let v=value.replace(/^secondlife:\/\//i,'').replace(/^\/+/,'');
+   const m=v.match(/^([^\/]+)\/([0-9.]+)\/([0-9.]+)\/([0-9.]+)$/i);
+   if(m){ region=decodeURIComponent(m[1]); x=m[2]; y=m[3]; z=m[4]; }
+ }
+ if(region){
+   const safeRegion=String(region).trim();
+   if(!safeRegion)return 'last';
+   return `uri:${safeRegion}&${Number(x)}&${Number(y)}&${Number(z)}`;
+ }
+ if(/^uri:[^&]+&[0-9.]+&[0-9.]+&[0-9.]+$/i.test(value))return value;
+ console.warn(`[Start] Local inválido ignorado: ${value}. Usando última localização.`);
+ return 'last';
+}
+function makeLoginParameters(){
+ const p=new nmv.LoginParameters();
+ p.firstName=cfg.bot.firstName;
+ p.lastName=cfg.bot.lastName;
+ p.password=cfg.bot.password;
+ p.start=normalizeStartLocation(cfg.bot.start);
+ console.log(`[Start] Local de login: ${p.start}`);
+ return p;
+}
 function validarCredenciais(){ if(!cfg.bot.firstName||!cfg.bot.lastName||!cfg.bot.password) throw new Error('Configure firstName, lastName e password deste bot no painel.'); }
 function getAdminIdentity(e){ const n=String((e&&e.fromName)||'').toLowerCase().trim(); const u=e&&e.from?e.from.toString().toLowerCase().trim():''; const ns=(cfg.security.allowedAdminNames||[]).map(x=>String(x).toLowerCase().trim()).filter(Boolean); const us=(cfg.security.allowedAdminUUIDs||[]).map(x=>String(x).toLowerCase().trim()).filter(Boolean); return {name:n,uuid:u,names:ns,uuids:us,isAdmin:ns.includes(n)||us.includes(u)}; }
 function isAllowedAdmin(e){ if(!cfg.features.onlyAllowedAdmins)return true; return getAdminIdentity(e).isAdmin; }
