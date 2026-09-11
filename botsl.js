@@ -7,6 +7,9 @@ try {
 const BOT_ID = Number(process.env.BOT_ID || 0);
 function loadRuntimeConfig(){ const raw=process.env.BOT_CONFIG_B64||''; if(!raw) throw new Error('BOT_CONFIG_B64 ausente. Inicie pelo Agent.'); return JSON.parse(Buffer.from(raw,'base64').toString('utf8')); }
 let cfg, loginParameters, bot, botUUID=null, intervaloAnuncio=null, reconnectTimer=null, shuttingDown=false, slOnline=false;
+let hasConnectedOnce=false;
+let autoHomeUsed=false;
+let teleportGraceUntil=0;
 const avataresCumprimentados = new Set();
 const rlvRestricoes = { bloquearTeleporte:false };
 const options = nmv.BotOptionFlags.LiteObjectStore | nmv.BotOptionFlags.StoreMyAttachmentsOnly;
@@ -14,13 +17,29 @@ function notifyParent(type,payload={}){ try{ if(process.send)process.send({type,
 function limparRotinasAutomaticas(){ if(intervaloAnuncio){ clearInterval(intervaloAnuncio); intervaloAnuncio=null; } }
 function eventoTexto(e){ if(!e)return ''; if(typeof e==='string')return e; return String(e.message||e.Message||e.reason||e.name||JSON.stringify(e)); }
 function assinarEvento(nome,handler){ try{ const ev=bot&&bot.clientEvents&&bot.clientEvents[nome]; if(ev&&typeof ev.subscribe==='function')ev.subscribe(handler); }catch(_){} }
+function marcarJanelaDeTeleporte(motivo,ms){
+ const tempo=Math.max(15000,Number(ms||process.env.SL_TELEPORT_GRACE_MS||60000));
+ teleportGraceUntil=Date.now()+tempo;
+ console.log(`[Teleporte] ${motivo||'teleporte iniciado'}. Proteção contra falso reconnect por ${Math.round(tempo/1000)}s.`);
+}
+function desconexaoDuranteTeleporte(){
+ return Date.now()<teleportGraceUntil;
+}
+function tratarEventoDesconexao(rotulo,e){
+ const detalhe=eventoTexto(e);
+ if(desconexaoDuranteTeleporte()){
+   console.log(`[Teleporte] ${rotulo} ignorado durante troca de região${detalhe?`: ${detalhe}`:''}.`);
+   return;
+ }
+ agendarReconexao(`${rotulo}${detalhe?`: ${detalhe}`:''}`,Number(cfg.features.reconnectMs||15000));
+}
 function configurarMonitorDeConexao(){
- assinarEvento('onDisconnected',e=>agendarReconexao('evento onDisconnected: '+eventoTexto(e),Number(cfg.features.reconnectMs||15000)));
- assinarEvento('onDisconnect',e=>agendarReconexao('evento onDisconnect: '+eventoTexto(e),Number(cfg.features.reconnectMs||15000)));
- assinarEvento('onConnectionClosed',e=>agendarReconexao('conexão fechada: '+eventoTexto(e),Number(cfg.features.reconnectMs||15000)));
- assinarEvento('onLogout',e=>agendarReconexao('logout detectado: '+eventoTexto(e),Number(cfg.features.reconnectMs||15000)));
- assinarEvento('onClose',e=>agendarReconexao('conexão encerrada: '+eventoTexto(e),Number(cfg.features.reconnectMs||15000)));
- assinarEvento('onAlertMessage',e=>{ const msg=eventoTexto(e); console.log('[Alerta SL] '+msg); if(/RegionRestart|will restart|will be logged out|logged out/i.test(msg))agendarReconexao('restart da região detectado',Number(process.env.SL_REGION_RECOVERY_DELAY_MS||90000)); });
+ assinarEvento('onDisconnected',e=>tratarEventoDesconexao('evento onDisconnected',e));
+ assinarEvento('onDisconnect',e=>tratarEventoDesconexao('evento onDisconnect',e));
+ assinarEvento('onConnectionClosed',e=>tratarEventoDesconexao('conexão fechada',e));
+ assinarEvento('onLogout',e=>tratarEventoDesconexao('logout detectado',e));
+ assinarEvento('onClose',e=>tratarEventoDesconexao('conexão encerrada',e));
+ assinarEvento('onAlertMessage',e=>{ const msg=eventoTexto(e); console.log('[Alerta SL] '+msg); if(/RegionRestart|will restart|will be logged out|logged out/i.test(msg)&&!desconexaoDuranteTeleporte())agendarReconexao('restart da região detectado',Number(process.env.SL_REGION_RECOVERY_DELAY_MS||90000)); });
 }
 function agendarReconexao(reason,delayMs){
  if(shuttingDown)return;
@@ -30,7 +49,13 @@ function agendarReconexao(reason,delayMs){
  if(reconnectTimer)return;
  const tempo=Math.max(3000,Number(delayMs||cfg.features.reconnectMs||15000));
  console.log(`[Auto-Reconectar] ${reason||'desconectado'}. Tentando reconectar em ${Math.round(tempo/1000)} segundos...`);
- reconnectTimer=setTimeout(()=>{ reconnectTimer=null; if(shuttingDown)return; try{ bot=new nmv.Bot(loginParameters,options); iniciarConexaoBot(); }catch(e){ console.error('Erro ao reiniciar instância do bot:',e.message||e); agendarReconexao('erro ao reiniciar instância: '+(e.message||e),tempo); } },tempo);
+ reconnectTimer=setTimeout(()=>{ reconnectTimer=null; if(shuttingDown)return; try{
+   // IMPORTANTE: Start configurado só vale no primeiro login do processo.
+   // Em reconexões usamos "last" para o bot permanecer no último local onde foi levado.
+   loginParameters=makeLoginParameters(false);
+   bot=new nmv.Bot(loginParameters,options);
+   iniciarConexaoBot();
+ }catch(e){ console.error('Erro ao reiniciar instância do bot:',e.message||e); agendarReconexao('erro ao reiniciar instância: '+(e.message||e),tempo); } },tempo);
 }
 function normalizeStartLocation(raw){
  const value=String(raw||'').trim();
@@ -56,20 +81,34 @@ function normalizeStartLocation(raw){
  console.warn(`[Start] Local inválido ignorado: ${value}. Usando última localização.`);
  return 'last';
 }
-function makeLoginParameters(){
+function makeLoginParameters(useConfiguredStart=true){
  const p=new nmv.LoginParameters();
  p.firstName=cfg.bot.firstName;
  p.lastName=cfg.bot.lastName;
  p.password=cfg.bot.password;
- p.start=normalizeStartLocation(cfg.bot.start);
- console.log(`[Start] Local de login: ${p.start}`);
+ p.start=useConfiguredStart?normalizeStartLocation(cfg.bot.start):'last';
+ console.log(`[Start] Local de login: ${p.start}${useConfiguredStart?' (inicial)':' (reconexão/último local)'}`);
  return p;
 }
 function validarCredenciais(){ if(!cfg.bot.firstName||!cfg.bot.lastName||!cfg.bot.password) throw new Error('Configure firstName, lastName e password deste bot no painel.'); }
 function getAdminIdentity(e){ const n=String((e&&e.fromName)||'').toLowerCase().trim(); const u=e&&e.from?e.from.toString().toLowerCase().trim():''; const ns=(cfg.security.allowedAdminNames||[]).map(x=>String(x).toLowerCase().trim()).filter(Boolean); const us=(cfg.security.allowedAdminUUIDs||[]).map(x=>String(x).toLowerCase().trim()).filter(Boolean); return {name:n,uuid:u,names:ns,uuids:us,isAdmin:ns.includes(n)||us.includes(u)}; }
 function isAllowedAdmin(e){ if(!cfg.features.onlyAllowedAdmins)return true; return getAdminIdentity(e).isAdmin; }
 function isTeleportAdmin(e){ return getAdminIdentity(e).isAdmin; }
-function iniciarConexaoBot(){ if(shuttingDown)return; slOnline=false; notifyParent('SL_CONNECTING',{botId:BOT_ID}); console.log(`Tentando realizar login no Second Life para bot ${BOT_ID}...`); bot.login().then(r=>{ console.log('Login completo com sucesso!'); if(r&&r.agentID)botUUID=r.agentID.toString(); return bot.connectToSim(); }).then(async()=>{ slOnline=true; notifyParent('SL_ONLINE',{botId:BOT_ID}); console.log('Conectado ao simulador! O bot está ativo.'); configurarMonitorDeConexao(); configurarRotinasAutomaticas(); if(cfg.home&&cfg.home.autoGoHome) await goHomeFromConfig(); }).catch(err=>{ console.error('Erro detectado no login ou conexão:',err.message||err); agendarReconexao('erro no login ou conexão: '+(err.message||err),Number(cfg.features.reconnectMs||15000)); }); }
+function iniciarConexaoBot(){ if(shuttingDown)return; slOnline=false; notifyParent('SL_CONNECTING',{botId:BOT_ID}); console.log(`Tentando realizar login no Second Life para bot ${BOT_ID}...`); bot.login().then(r=>{ console.log('Login completo com sucesso!'); if(r&&r.agentID)botUUID=r.agentID.toString(); return bot.connectToSim(); }).then(async()=>{
+ const primeiraConexao=!hasConnectedOnce;
+ hasConnectedOnce=true;
+ slOnline=true;
+ notifyParent('SL_ONLINE',{botId:BOT_ID});
+ console.log('Conectado ao simulador! O bot está ativo.');
+ configurarMonitorDeConexao();
+ configurarRotinasAutomaticas();
+ // Home automático SOMENTE na primeira conexão deste processo.
+ // Se você mandar o bot para outro lugar, reconexões futuras usarão "last" e ele não volta para Home/Start.
+ if(primeiraConexao&&cfg.home&&cfg.home.autoGoHome&&!autoHomeUsed){
+   autoHomeUsed=true;
+   await goHomeFromConfig();
+ }
+}).catch(err=>{ console.error('Erro detectado no login ou conexão:',err.message||err); agendarReconexao('erro no login ou conexão: '+(err.message||err),Number(cfg.features.reconnectMs||15000)); }); }
 function configurarRotinasAutomaticas(){ limparRotinasAutomaticas(); if(cfg.features.localAnnouncementEnabled){ intervaloAnuncio=setInterval(()=>{ if(bot.clientCommands&&bot.clientCommands.comms){ bot.clientCommands.comms.say(cfg.features.announcementMessage,0); console.log('[Anúncio] Mensagem automática enviada no chat local.'); } },Number(cfg.features.announcementMinutes||15)*60*1000); }
  if(cfg.features.welcomeEnabled&&bot.clientEvents.onNearbyChat){ bot.clientEvents.onNearbyChat.subscribe(e=>{ const id=e.from.toString(); if(id===botUUID||e.fromName==='Sistema')return; if(!avataresCumprimentados.has(id)){ avataresCumprimentados.add(id); console.log(`[Boas-vindas] Avatar detectado: ${e.fromName}. Enviando IM...`); setTimeout(()=>bot.clientCommands.comms.sendInstantMessage(e.from,cfg.features.welcomeMessage).catch(er=>console.error('Erro ao enviar IM:',er.message||er)),2000); } }); }
  if(bot.clientEvents.onScriptDialog) bot.clientEvents.onScriptDialog.subscribe(d=>console.log(`[HUD Dialog] ${d.message}`));
@@ -83,10 +122,10 @@ function processarRLV(e,msg,texto){ console.log(`[RLV] Comando detectado: ${msg}
 async function findInventoryItem(nameOrUUID){ const inv=await bot.clientCommands.inventory.getInventoryRoot(); const needle=nameOrUUID.toLowerCase(); const byID=inv.items.find(item=>item.itemID.toString().toLowerCase()===needle); if(byID!==undefined)return byID; const folders=[inv,...inv.getChildFoldersRecursive()]; for(const f of folders){ const exact=f.items.find(item=>item.name.toLowerCase()===needle); if(exact!==undefined)return exact; } for(const f of folders){ const partial=f.items.find(item=>item.name.toLowerCase().includes(needle)); if(partial!==undefined)return partial; } throw new Error(`item não encontrado no inventário carregado: ${nameOrUUID}`); }
 function parseAttachmentPoint(value){ const norm=value.toLowerCase().replace(/[^a-z0-9]/g,''); for(const key of Object.keys(AttachmentPoint).filter(k=>Number.isNaN(Number(k)))){ if(key.toLowerCase().replace(/[^a-z0-9]/g,'')===norm)return AttachmentPoint[key]; } throw new Error(`attachment point inválido: ${value}`); }
 function parseSlurl(raw){ const m=String(raw||'').match(/\/secondlife\/([^\/]+)\/([0-9.]+)\/([0-9.]+)\/([0-9.]+)/i); if(!m)throw new Error('envie o link maps.secondlife.com/secondlife/Regiao/X/Y/Z'); return { region:decodeURIComponent(m[1]), x:parseFloat(m[2]), y:parseFloat(m[3]), z:parseFloat(m[4]) }; }
-async function processTeleportUrl(raw){ if(rlvRestricoes.bloquearTeleporte)return 'Comando recusado: restrição RLV de teleporte ativa.'; const loc=parseSlurl(raw); if(bot.clientCommands&&bot.clientCommands.teleport&&typeof bot.clientCommands.teleport.teleportTo==='function')await bot.clientCommands.teleport.teleportTo(loc.region,new nmv.Vector3([loc.x,loc.y,loc.z]),new nmv.Vector3([loc.x,loc.y,loc.z])); else if(bot.client&&bot.client.self)bot.client.self.teleport(loc.region,new nmv.Vector3([loc.x,loc.y,loc.z])); return `Iniciando teleporte para: ${loc.region} (${loc.x}, ${loc.y}, ${loc.z})`; }
+async function processTeleportUrl(raw){ if(rlvRestricoes.bloquearTeleporte)return 'Comando recusado: restrição RLV de teleporte ativa.'; const loc=parseSlurl(raw); marcarJanelaDeTeleporte(`indo para ${loc.region}`,Number(process.env.SL_TELEPORT_GRACE_MS||60000)); if(bot.clientCommands&&bot.clientCommands.teleport&&typeof bot.clientCommands.teleport.teleportTo==='function')await bot.clientCommands.teleport.teleportTo(loc.region,new nmv.Vector3([loc.x,loc.y,loc.z]),new nmv.Vector3([loc.x,loc.y,loc.z])); else if(bot.client&&bot.client.self)bot.client.self.teleport(loc.region,new nmv.Vector3([loc.x,loc.y,loc.z])); return `Iniciando teleporte para: ${loc.region} (${loc.x}, ${loc.y}, ${loc.z})`; }
 async function goHomeFromConfig(){ try{ if(!cfg.home||!cfg.home.url){ console.log('[Home] URL da ilha não configurada.'); return 'URL da ilha não configurada.'; } const msg=await processTeleportUrl(cfg.home.url); console.log('[Home] '+msg); const obj=String(cfg.home.objectUUID||'').trim(); if(cfg.home.autoSit&&obj){ setTimeout(()=>{ bot.clientCommands.movement.sitOnObject(new nmv.UUID(obj),new nmv.Vector3([0,0,0])).then(()=>console.log('[Home] Sentar no objeto enviado.')).catch(er=>console.error('[Home] Erro ao sentar:',er.message||er)); }, Number(process.env.HOME_SIT_DELAY_MS||8000)); return msg+' Depois vai tentar sentar no objeto configurado.'; } return msg; }catch(err){ console.error('[Home] Erro:',err.message||err); return 'Erro no home: '+(err.message||err); } }
 async function processCommand(message){ let text=message.trim(); if(text.startsWith('!'))text=text.slice(1).trim(); if(text.length===0)return 'comando vazio'; const pieces=text.includes('|')?text.split('|'):text.split(/\s+/); const command=(pieces.shift()||'').trim().toLowerCase(); const args=pieces.map(i=>i.trim()).filter(Boolean); switch(command){ case 'help':case 'ajuda':return '!status | !home | !tp LINK | !invite AVATAR_UUID [GRUPO_UUID] [ROLE_UUID] | !sit UUID | !stand | !sitground | !say [canal] texto | !attach item ponto | !detach item'; case 'status':return `online. bot=${BOT_ID}. região=${(bot.currentRegion&&bot.currentRegion.regionName)||'desconhecida'}. RLV_TP=${rlvRestricoes.bloquearTeleporte?'Bloqueado':'Livre'}`; case 'home':return await goHomeFromConfig(); case 'tp':case 'teleport':if(!args.length)throw new Error('Link ausente'); return await processTeleportUrl(args.join(' ')); case 'sit':case 'sentar':if(!args.length||args[0].length<32)throw new Error('uso: !sit UUID'); await bot.clientCommands.movement.sitOnObject(new nmv.UUID(args[0]),new nmv.Vector3([0,0,0])); return `Comando sit enviado para ${args[0]}`; case 'stand':case 'levantar':bot.clientCommands.movement.stand(); return 'stand enviado'; case 'sitground':bot.clientCommands.movement.sitOnGround(); return 'sit ground enviado'; case 'invite':case 'convidar':case 'groupinvite':if(!args.length)throw new Error('Uso: !invite AVATAR_UUID [GRUPO_UUID] [ROLE_UUID]'); return await sendGroupInviteFromConfig({avatarID:args[0],groupID:args[1],roleID:args[2]}); case 'say':case 'falar':{ if(!args.length)throw new Error('Texto ausente'); let channel=0, sayText=args.join(' '); if(args.length>=2&&/^-?\d+$/.test(args[0])){ channel=Number.parseInt(args[0],10); sayText=args.slice(1).join(' '); } await bot.clientCommands.comms.say(sayText,channel); return `chat enviado no canal ${channel}`;} case 'attach':case 'wear':case 'vestir':{ if(!args.length)throw new Error('Uso: !attach nomeDoItem [AttachmentPoint]'); const item=await findInventoryItem(args[0]); await item.attachToAvatar(parseAttachmentPoint(args[1]||'Default')); return `attach enviado: ${item.name}`;} case 'detach':case 'tirar':{ if(!args.length)throw new Error('Uso: !detach nomeDoItem'); const item=await findInventoryItem(args[0]); await item.detachFromAvatar(); return `detach enviado: ${item.name}`;} default:throw new Error(`comando desconhecido: ${command}. use !help`); } }
-async function boot(){ if(!BOT_ID)throw new Error('BOT_ID ausente. Inicie pelo Agent.'); cfg=loadRuntimeConfig(); if(!cfg)throw new Error(`Configuração do bot ${BOT_ID} ausente.`); validarCredenciais(); loginParameters=makeLoginParameters(); bot=new nmv.Bot(loginParameters,options); iniciarConexaoBot(); }
+async function boot(){ if(!BOT_ID)throw new Error('BOT_ID ausente. Inicie pelo Agent.'); cfg=loadRuntimeConfig(); if(!cfg)throw new Error(`Configuração do bot ${BOT_ID} ausente.`); validarCredenciais(); loginParameters=makeLoginParameters(true); bot=new nmv.Bot(loginParameters,options); iniciarConexaoBot(); }
 boot().catch(err=>{ console.error('Erro ao iniciar bot:',err.message||err); process.exit(1); });
 process.on('message',async message=>{ try{ if(!message)return; if(!bot||!bot.clientCommands||!slOnline)throw new Error('Bot ainda não está online no Second Life.'); if(message.type==='GROUP_INVITE'){ const result=await sendGroupInviteFromConfig(message.payload||{}); console.log(`[Grupo] ${result}`); return; } if(message.type==='GO_HOME'){ const result=await goHomeFromConfig(); console.log(`[Home] ${result}`); return; } }catch(err){ console.error('[Comando] Erro:',err.message||err); } });
 process.on('SIGTERM',()=>{ shuttingDown=true; slOnline=false; notifyParent('SL_OFFLINE',{botId:BOT_ID,reason:'SIGTERM recebido',phase:'offline'}); console.log('Recebido SIGTERM. Encerrando bot.'); limparRotinasAutomaticas(); if(reconnectTimer)clearTimeout(reconnectTimer); process.exit(0); });
