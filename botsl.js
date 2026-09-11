@@ -111,6 +111,29 @@ function iniciarConexaoBot(){ if(shuttingDown)return; slOnline=false; notifyPare
 }).catch(err=>{ console.error('Erro detectado no login ou conexão:',err.message||err); agendarReconexao('erro no login ou conexão: '+(err.message||err),Number(cfg.features.reconnectMs||15000)); }); }
 function configurarRotinasAutomaticas(){ limparRotinasAutomaticas(); if(cfg.features.localAnnouncementEnabled){ intervaloAnuncio=setInterval(()=>{ if(bot.clientCommands&&bot.clientCommands.comms){ bot.clientCommands.comms.say(cfg.features.announcementMessage,0); console.log('[Anúncio] Mensagem automática enviada no chat local.'); } },Number(cfg.features.announcementMinutes||15)*60*1000); }
  if(cfg.features.welcomeEnabled&&bot.clientEvents.onNearbyChat){ bot.clientEvents.onNearbyChat.subscribe(e=>{ const id=e.from.toString(); if(id===botUUID||e.fromName==='Sistema')return; if(!avataresCumprimentados.has(id)){ avataresCumprimentados.add(id); console.log(`[Boas-vindas] Avatar detectado: ${e.fromName}. Enviando IM...`); setTimeout(()=>bot.clientCommands.comms.sendInstantMessage(e.from,cfg.features.welcomeMessage).catch(er=>console.error('Erro ao enviar IM:',er.message||er)),2000); } }); }
+ if(bot.clientEvents.onLure) bot.clientEvents.onLure.subscribe(async lure=>{
+  try{
+    const who=(lure&&lure.fromName)||(lure&&lure.from&&lure.from.toString())||'desconhecido';
+    if(!isTeleportAdmin(lure)){
+      console.log(`[Segurança] Offer Teleport ignorado de ${who}.`);
+      return;
+    }
+    if(rlvRestricoes.bloquearTeleporte){
+      console.log(`[Segurança] Offer Teleport de ${who} recusado por restrição RLV.`);
+      return;
+    }
+    if(!bot.clientCommands||!bot.clientCommands.teleport||typeof bot.clientCommands.teleport.acceptTeleport!=='function'){
+      console.error('[TP Offer] acceptTeleport não está disponível nesta versão do node-metaverse.');
+      return;
+    }
+    marcarJanelaDeTeleporte(`aceitando Offer Teleport de ${who}`,Number(process.env.SL_TELEPORT_GRACE_MS||60000));
+    console.log(`[TP Offer] Convite autorizado de ${who}. Aceitando...`);
+    await bot.clientCommands.teleport.acceptTeleport(lure);
+    console.log(`[TP Offer] Teleporte aceito de ${who}.`);
+  }catch(err){
+    console.error('[TP Offer] Erro ao aceitar Offer Teleport:',err.message||err);
+  }
+ });
  if(bot.clientEvents.onScriptDialog) bot.clientEvents.onScriptDialog.subscribe(d=>console.log(`[HUD Dialog] ${d.message}`));
  bot.clientEvents.onInstantMessage.subscribe(e=>{ try{ if(botUUID&&e.from.toString()===botUUID)return; if(e.dialog===InstantMessageDialog.GroupInvitation&&cfg.features.autoAcceptGroups){ console.log(`[Grupo] Convite recebido de ${e.fromName}. Aceitando automaticamente...`); const g=bot.clientCommands.group||bot.clientCommands.groups; if(g&&typeof g.acceptGroupInvite==='function')g.acceptGroupInvite(e).catch(er=>console.error('Erro ao aceitar grupo:',er.message||er)); else if(g&&typeof g.acceptInvitation==='function')g.acceptInvitation(e.imSessionID).catch(er=>console.error('Erro ao aceitar grupo:',er.message||er)); else console.error('Comando para aceitar convite não disponível nesta versão.'); return; } const msg=String(e.message||'').trim(); const texto=msg.toLowerCase(); if(cfg.features.allowRlv&&(msg.startsWith('@')||(e.binaryBucket&&e.binaryBucket.toString().includes('@')))){ processarRLV(e,msg,texto); return; } if(texto.includes('maps.secondlife.com/secondlife/')){ if(!cfg.features.allowTeleportLinks||rlvRestricoes.bloquearTeleporte){ bot.clientCommands.comms.sendInstantMessage(e.from,'Teleporte recusado por configuração ou restrição RLV ativa.').catch(()=>{}); return; } if(!isTeleportAdmin(e)){ console.log(`[Segurança] Link de teleporte ignorado de ${e.fromName||e.from||'desconhecido'}.`); bot.clientCommands.comms.sendInstantMessage(e.from,'Teleporte recusado: somente um administrador autorizado pode mover este bot.').catch(()=>{}); return; } processTeleportUrl(msg).catch(er=>console.error('Erro ao teleportar:',er.message||er)); return; } if(isCommand(texto)){ const isMovementCommand = /^(?:!\s*)?(?:tp|teleport|home)(?:\s|$)/i.test(msg); if(isMovementCommand && !isTeleportAdmin(e)){ console.log(`[Segurança] Comando de movimento ignorado de ${e.fromName||e.from||'desconhecido'}.`); bot.clientCommands.comms.sendInstantMessage(e.from,'Comando recusado: somente um administrador autorizado pode mover este bot.').catch(()=>{}); return; } if(!isAllowedAdmin(e)){ bot.clientCommands.comms.sendInstantMessage(e.from,'Você não tem permissão para comandar este bot.').catch(()=>{}); return; } processCommand(msg).then(resp=>bot.clientCommands.comms.sendInstantMessage(e.from,resp)).catch(er=>bot.clientCommands.comms.sendInstantMessage(e.from,er.message||'Erro no comando').catch(()=>{})); } }catch(err){ console.error('Erro ao processar IM:',err.message||err); } });
  bot.clientEvents.onNearbyChat.subscribe(e=>{ if(botUUID&&e.from.toString()===botUUID)return; const msg=String(e.message||'').trim(); const texto=msg.toLowerCase(); if(cfg.features.allowRlv&&msg.startsWith('@sit:')){ try{ const target=msg.split('sit:')[1].split('=')[0].trim(); bot.clientCommands.movement.sitOnObject(new nmv.UUID(target),new nmv.Vector3([0,0,0])).catch(()=>{}); }catch(_){} return; } if(!isCommand(texto))return; const isMovementCommand=/^(?:!\s*)?(?:tp|teleport|home)(?:\s|$)/i.test(msg); if(isMovementCommand&&!isTeleportAdmin(e)){ console.log(`[Segurança] Comando de movimento local ignorado de ${e.fromName||e.from||'desconhecido'}.`); return; } if(!isAllowedAdmin(e))return; processCommand(msg).then(resp=>bot.clientCommands.comms.say(resp,0)).catch(er=>bot.clientCommands.comms.say(er.message||'Erro no comando',0)); }); }
