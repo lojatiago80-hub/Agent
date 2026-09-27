@@ -1,0 +1,6 @@
+{
+  "name":"sl-single-bot-agent","version":"1.0.0","private":true,"main":"agent.js",
+  "scripts":{"start":"node agent.js","test":"node --check agent.js && node --check botsl.js"},
+  "engines":{"node":">=18"},
+  "dependencies":{"@caspertech/node-metaverse":"^0.8.6","dotenv":"^16.4.7","express":"^4.19.2"}
+}
