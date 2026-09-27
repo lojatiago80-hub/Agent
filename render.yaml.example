@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: sl-bot-agent
-    runtime: node
-    buildCommand: npm install
-    startCommand: npm start
-    healthCheckPath: /health
