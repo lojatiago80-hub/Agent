@@ -16,18 +16,9 @@ let teleportGraceUntil=0;
 const avataresCumprimentados = new Set();
 const rlvRestricoes = { bloquearTeleporte:false };
 
-// Manter o consumo de memória baixo limitando cache do mapa/inventário
 const options = nmv.BotOptionFlags.LiteObjectStore | nmv.BotOptionFlags.StoreMyAttachmentsOnly;
 
-// Limpeza de cache para economizar RAM em execuções de longa duração
-setInterval(() => {
-  if (avataresCumprimentados.size > 200) {
-    avataresCumprimentados.clear();
-  }
-}, 6 * 60 * 60 * 1000).unref();
-
 function currentRegionName(){ try{return String((bot&&bot.currentRegion&&bot.currentRegion.regionName)||'').trim();}catch(_){return '';} }
-
 function notifyParent(type,payload={}){ try{ if(process.send)process.send({type,payload}); }catch(_){} }
 
 // Heartbeat local: não grava no banco; serve apenas para o Agent detectar processo travado.
@@ -41,136 +32,140 @@ function eventoTexto(e){ if(!e)return ''; if(typeof e==='string')return e; retur
 function assinarEvento(nome,handler){ try{ const ev=bot&&bot.clientEvents&&bot.clientEvents[nome]; if(ev&&typeof ev.subscribe==='function')ev.subscribe(handler); }catch(_){} }
 
 function marcarJanelaDeTeleporte(motivo,ms){
-  const tempo=Math.max(15000,Number(ms||process.env.SL_TELEPORT_GRACE_MS||60000));
-  teleportGraceUntil=Date.now()+tempo;
-  console.log(`[Teleporte] ${motivo||'teleporte iniciado'}. Proteção contra falso reconnect por ${Math.round(tempo/1000)}s.`);
+ const tempo=Math.max(15000,Number(ms||process.env.SL_TELEPORT_GRACE_MS||60000));
+ teleportGraceUntil=Date.now()+tempo;
+ console.log(`[Teleporte] ${motivo||'teleporte iniciado'}. Proteção contra falso reconnect por ${Math.round(tempo/1000)}s.`);
 }
 
 function desconexaoDuranteTeleporte(){
-  return Date.now()<teleportGraceUntil;
+ return Date.now()<teleportGraceUntil;
 }
 
 function tratarEventoDesconexao(rotulo,e){
-  const detalhe=eventoTexto(e);
-  if(desconexaoDuranteTeleporte()){
-    console.log(`[Teleporte] ${rotulo} ignorado durante troca de região${detalhe?`: ${detalhe}`:''}.`);
-    return;
-  }
-  const normalDelay=Number(cfg.features.regionRecoveryMs||process.env.SL_REGION_RECOVERY_DELAY_MS||90000);
-  const firstDelay=Number(cfg.features.reconnectMs||15000);
-  agendarReconexao(`${rotulo}${detalhe?`: ${detalhe}`:''}`,hasConnectedOnce?normalDelay:firstDelay);
+ const detalhe=eventoTexto(e);
+ if(desconexaoDuranteTeleporte()){
+   console.log(`[Teleporte] ${rotulo} ignorado durante troca de região${detalhe?`: ${detalhe}`:''}.`);
+   return;
+ }
+ // Queda inesperada depois de já estar online: espera a região voltar antes de relogar.
+ const normalDelay=Number(cfg.features.regionRecoveryMs||process.env.SL_REGION_RECOVERY_DELAY_MS||90000);
+ const firstDelay=Number(cfg.features.reconnectMs||15000);
+ agendarReconexao(`${rotulo}${detalhe?`: ${detalhe}`:''}`,hasConnectedOnce?normalDelay:firstDelay);
 }
 
 function configurarMonitorDeConexao(){
-  assinarEvento('onDisconnected',e=>tratarEventoDesconexao('evento onDisconnected',e));
-  assinarEvento('onDisconnect',e=>tratarEventoDesconexao('evento onDisconnect',e));
-  assinarEvento('onConnectionClosed',e=>tratarEventoDesconexao('conexão fechada',e));
-  assinarEvento('onLogout',e=>tratarEventoDesconexao('logout detectado',e));
-  assinarEvento('onClose',e=>tratarEventoDesconexao('conexão encerrada',e));
-  assinarEvento('onAlertMessage',e=>{ const msg=eventoTexto(e); console.log('[Alerta SL] '+msg); if(/RegionRestart|will restart|will be logged out|logged out/i.test(msg)&&!desconexaoDuranteTeleporte())agendarReconexao('restart da região detectado',Number(process.env.SL_REGION_RECOVERY_DELAY_MS||90000)); });
+ assinarEvento('onDisconnected',e=>tratarEventoDesconexao('evento onDisconnected',e));
+ assinarEvento('onDisconnect',e=>tratarEventoDesconexao('evento onDisconnect',e));
+ assinarEvento('onConnectionClosed',e=>tratarEventoDesconexao('conexão fechada',e));
+ assinarEvento('onLogout',e=>tratarEventoDesconexao('logout detectado',e));
+ assinarEvento('onClose',e=>tratarEventoDesconexao('conexão encerrada',e));
+ assinarEvento('onAlertMessage',e=>{ const msg=eventoTexto(e); console.log('[Alerta SL] '+msg); if(/RegionRestart|will restart|will be logged out|logged out/i.test(msg)&&!desconexaoDuranteTeleporte())agendarReconexao('restart da região detectado',Number(process.env.SL_REGION_RECOVERY_DELAY_MS||90000)); });
 }
 
 function agendarReconexao(reason,delayMs){
-  if(shuttingDown)return;
-  slOnline=false;
-  notifyParent('SL_OFFLINE',{botId:BOT_ID,reason:String(reason||'desconectado'),phase:'waiting_region'});
-  limparRotinasAutomaticas();
-  if(reconnectTimer)return;
-  const tempo=Math.max(3000,Number(delayMs||cfg.features.reconnectMs||15000));
-  console.log(`[Auto-Reconectar] ${reason||'desconectado'}. Tentando reconectar em ${Math.round(tempo/1000)} segundos...`);
-  reconnectTimer=setTimeout(()=>{ reconnectTimer=null; if(shuttingDown)return; try{
-    loginParameters=makeLoginParameters(false);
-    bot=new nmv.Bot(loginParameters,options);
-    iniciarConexaoBot();
-  }catch(e){ console.error('Erro ao reiniciar instância do bot:',e.message||e); agendarReconexao('erro ao reiniciar instância: '+(e.message||e),tempo); } },tempo);
+ if(shuttingDown)return;
+ slOnline=false;
+ notifyParent('SL_OFFLINE',{botId:BOT_ID,reason:String(reason||'desconectado'),phase:'waiting_region'});
+ limparRotinasAutomaticas();
+ if(reconnectTimer)return;
+ const tempo=Math.max(3000,Number(delayMs||cfg.features.reconnectMs||15000));
+ console.log(`[Auto-Reconectar] ${reason||'desconectado'}. Tentando reconectar em ${Math.round(tempo/1000)} segundos...`);
+ reconnectTimer=setTimeout(()=>{ reconnectTimer=null; if(shuttingDown)return; try{
+   // IMPORTANTE: Start configurado só vale no primeiro login do processo.
+   // Em reconexões usamos "last" para o bot permanecer no último local onde foi levado.
+   loginParameters=makeLoginParameters(false);
+   bot=new nmv.Bot(loginParameters,options);
+   iniciarConexaoBot();
+ }catch(e){ console.error('Erro ao reiniciar instância do bot:',e.message||e); agendarReconexao('erro ao reiniciar instância: '+(e.message||e),tempo); } },tempo);
 }
 
 function normalizeStartLocation(raw){
-  const value=String(raw||'').trim();
-  if(!value)return 'last';
-  if(/^(last|home)$/i.test(value))return value.toLowerCase();
-  let region,x,y,z;
-  try{
-    const url=new URL(value);
-    const m=url.pathname.match(/\/secondlife\/([^\/]+)\/([0-9.]+)\/([0-9.]+)\/([0-9.]+)/i);
-    if(m){ region=decodeURIComponent(m[1]); x=m[2]; y=m[3]; z=m[4]; }
-  }catch(_){}
-  if(!region){
-    let v=value.replace(/^secondlife:\/\//i,'').replace(/^\/+/,'');
-    const m=v.match(/^([^\/]+)\/([0-9.]+)\/([0-9.]+)\/([0-9.]+)$/i);
-    if(m){ region=decodeURIComponent(m[1]); x=m[2]; y=m[3]; z=m[4]; }
-  }
-  if(region){
-    const safeRegion=String(region).trim();
-    if(!safeRegion)return 'last';
-    return `uri:${safeRegion}&${Number(x)}&${Number(y)}&${Number(z)}`;
-  }
-  if(/^uri:[^&]+&[0-9.]+&[0-9.]+&[0-9.]+$/i.test(value))return value;
-  console.warn(`[Start] Local inválido ignorado: ${value}. Usando última localização.`);
-  return 'last';
+ const value=String(raw||'').trim();
+ if(!value)return 'last';
+ if(/^(last|home)$/i.test(value))return value.toLowerCase();
+ let region,x,y,z;
+ try{
+   const url=new URL(value);
+   const m=url.pathname.match(/\/secondlife\/([^\/]+)\/([0-9.]+)\/([0-9.]+)\/([0-9.]+)/i);
+   if(m){ region=decodeURIComponent(m[1]); x=m[2]; y=m[3]; z=m[4]; }
+ }catch(_){}
+ if(!region){
+   let v=value.replace(/^secondlife:\/\//i,'').replace(/^\/+/,'');
+   const m=v.match(/^([^\/]+)\/([0-9.]+)\/([0-9.]+)\/([0-9.]+)$/i);
+   if(m){ region=decodeURIComponent(m[1]); x=m[2]; y=m[3]; z=m[4]; }
+ }
+ if(region){
+   const safeRegion=String(region).trim();
+   if(!safeRegion)return 'last';
+   return `uri:${safeRegion}&${Number(x)}&${Number(y)}&${Number(z)}`;
+ }
+ if(/^uri:[^&]+&[0-9.]+&[0-9.]+&[0-9.]+$/i.test(value))return value;
+ console.warn(`[Start] Local inválido ignorado: ${value}. Usando última localização.`);
+ return 'last';
 }
 
 function makeLoginParameters(useConfiguredStart=true){
-  const p=new nmv.LoginParameters();
-  p.firstName=cfg.bot.firstName;
-  p.lastName=cfg.bot.lastName;
-  p.password=cfg.bot.password;
-  p.start=useConfiguredStart?normalizeStartLocation(cfg.bot.start):'last';
-  console.log(`[Start] Local de login: ${p.start}${useConfiguredStart?' (inicial)':' (reconexão/último local)'}`);
-  return p;
+ const p=new nmv.LoginParameters();
+ p.firstName=cfg.bot.firstName;
+ p.lastName=cfg.bot.lastName;
+ p.password=cfg.bot.password;
+ p.start=useConfiguredStart?normalizeStartLocation(cfg.bot.start):'last';
+ console.log(`[Start] Local de login: ${p.start}${useConfiguredStart?' (inicial)':' (reconexão/último local)'}`);
+ return p;
 }
 
 function validarCredenciais(){ if(!cfg.bot.firstName||!cfg.bot.lastName||!cfg.bot.password) throw new Error('Configure firstName, lastName e password deste bot no painel.'); }
 
 function getAdminIdentity(e){ const n=String((e&&e.fromName)||'').toLowerCase().trim(); const u=e&&e.from?e.from.toString().toLowerCase().trim():''; const ns=(cfg.security.allowedAdminNames||[]).map(x=>String(x).toLowerCase().trim()).filter(Boolean); const us=(cfg.security.allowedAdminUUIDs||[]).map(x=>String(x).toLowerCase().trim()).filter(Boolean); return {name:n,uuid:u,names:ns,uuids:us,isAdmin:ns.includes(n)||us.includes(u)}; }
+
 function isAllowedAdmin(e){ if(!cfg.features.onlyAllowedAdmins)return true; return getAdminIdentity(e).isAdmin; }
+
 function isTeleportAdmin(e){ return getAdminIdentity(e).isAdmin; }
 
 function iniciarConexaoBot(){ if(shuttingDown)return; slOnline=false; notifyParent('SL_CONNECTING',{botId:BOT_ID,phase:'connecting',reason:'Conectando ao Second Life...'}); console.log(`Tentando realizar login no Second Life para bot ${BOT_ID}...`); bot.login().then(r=>{ console.log('Login completo com sucesso!'); if(r&&r.agentID)botUUID=r.agentID.toString(); return bot.connectToSim(); }).then(async()=>{
-  const primeiraConexao=!hasConnectedOnce;
-  hasConnectedOnce=true;
-  slOnline=true;
-  notifyParent('SL_ONLINE',{botId:BOT_ID,region:currentRegionName()});
-  console.log('Conectado ao simulador! O bot está ativo.');
-  configurarMonitorDeConexao();
-  configurarRotinasAutomaticas();
-  if(primeiraConexao&&cfg.home&&cfg.home.autoGoHome&&!autoHomeUsed){
-    autoHomeUsed=true;
-    await goHomeFromConfig();
-  }
+ const primeiraConexao=!hasConnectedOnce;
+ hasConnectedOnce=true;
+ slOnline=true;
+ notifyParent('SL_ONLINE',{botId:BOT_ID,region:currentRegionName()});
+ console.log('Conectado ao simulador! O bot está ativo.');
+ configurarMonitorDeConexao();
+ configurarRotinasAutomaticas();
+ // Home automático SOMENTE na primeira conexão deste processo.
+ // Se você mandar o bot para outro lugar, reconexões futuras usarão "last" e ele não volta para Home/Start.
+ if(primeiraConexao&&cfg.home&&cfg.home.autoGoHome&&!autoHomeUsed){
+   autoHomeUsed=true;
+   await goHomeFromConfig();
+ }
 }).catch(err=>{ console.error('Erro detectado no login ou conexão:',err.message||err); agendarReconexao('erro no login ou conexão: '+(err.message||err),hasConnectedOnce?Number(cfg.features.regionRecoveryMs||process.env.SL_REGION_RECOVERY_DELAY_MS||90000):Number(cfg.features.reconnectMs||15000)); }); }
 
-function configurarRotinasAutomaticas(){ 
-  limparRotinasAutomaticas(); 
-  if(cfg.features.localAnnouncementEnabled){ intervaloAnuncio=setInterval(()=>{ if(bot.clientCommands&&bot.clientCommands.comms){ bot.clientCommands.comms.say(cfg.features.announcementMessage,0); console.log('[Anúncio] Mensagem automática enviada no chat local.'); } },Number(cfg.features.announcementMinutes||15)*60*1000); }
-  if(cfg.features.welcomeEnabled&&bot.clientEvents.onNearbyChat){ bot.clientEvents.onNearbyChat.subscribe(e=>{ const id=e.from.toString(); if(id===botUUID||e.fromName==='Sistema')return; if(!avataresCumprimentados.has(id)){ avataresCumprimentados.add(id); console.log(`[Boas-vindas] Avatar detectado: ${e.fromName}. Enviando IM...`); setTimeout(()=>bot.clientCommands.comms.sendInstantMessage(e.from,cfg.features.welcomeMessage).catch(er=>console.error('Erro ao enviar IM:',er.message||er)),2000); } }); }
-  if(bot.clientEvents.onLure) bot.clientEvents.onLure.subscribe(async lure=>{
-    try{
-      const who=(lure&&lure.fromName)||(lure&&lure.from&&lure.from.toString())||'desconhecido';
-      if(!isTeleportAdmin(lure)){
-        console.log(`[Segurança] Offer Teleport ignorado de ${who}.`);
-        return;
-      }
-      if(rlvRestricoes.bloquearTeleporte){
-        console.log(`[Segurança] Offer Teleport de ${who} recusado por restrição RLV.`);
-        return;
-      }
-      if(!bot.clientCommands||!bot.clientCommands.teleport||typeof bot.clientCommands.teleport.acceptTeleport!=='function'){
-        console.error('[TP Offer] acceptTeleport não está disponível nesta versão do node-metaverse.');
-        return;
-      }
-      marcarJanelaDeTeleporte(`aceitando Offer Teleport de ${who}`,Number(process.env.SL_TELEPORT_GRACE_MS||60000));
-      console.log(`[TP Offer] Convite autorizado de ${who}. Aceitando...`);
-      await bot.clientCommands.teleport.acceptTeleport(lure);
-      console.log(`[TP Offer] Teleporte aceito de ${who}.`);
-    }catch(err){
-      console.error('[TP Offer] Erro ao aceitar Offer Teleport:',err.message||err);
+function configurarRotinasAutomaticas(){ limparRotinasAutomaticas(); if(cfg.features.localAnnouncementEnabled){ intervaloAnuncio=setInterval(()=>{ if(bot.clientCommands&&bot.clientCommands.comms){ bot.clientCommands.comms.say(cfg.features.announcementMessage,0); console.log('[Anúncio] Mensagem automática enviada no chat local.'); } },Number(cfg.features.announcementMinutes||15)*60*1000); }
+ if(cfg.features.welcomeEnabled&&bot.clientEvents.onNearbyChat){ bot.clientEvents.onNearbyChat.subscribe(e=>{ const id=e.from.toString(); if(id===botUUID||e.fromName==='Sistema')return; if(!avataresCumprimentados.has(id)){ avataresCumprimentados.add(id); console.log(`[Boas-vindas] Avatar detectado: ${e.fromName}. Enviando IM...`); setTimeout(()=>bot.clientCommands.comms.sendInstantMessage(e.from,cfg.features.welcomeMessage).catch(er=>console.error('Erro ao enviar IM:',er.message||er)),2000); } }); }
+ if(bot.clientEvents.onLure) bot.clientEvents.onLure.subscribe(async lure=>{
+  try{
+    const who=(lure&&lure.fromName)||(lure&&lure.from&&lure.from.toString())||'desconhecido';
+    if(!isTeleportAdmin(lure)){
+      console.log(`[Segurança] Offer Teleport ignorado de ${who}.`);
+      return;
     }
-  });
-  if(bot.clientEvents.onScriptDialog) bot.clientEvents.onScriptDialog.subscribe(d=>console.log(`[HUD Dialog] ${d.message}`));
-  bot.clientEvents.onInstantMessage.subscribe(e=>{ try{ if(botUUID&&e.from.toString()===botUUID)return; if(e.dialog===InstantMessageDialog.GroupInvitation&&cfg.features.autoAcceptGroups){ console.log(`[Grupo] Convite recebido de ${e.fromName}. Aceitando automaticamente...`); const g=bot.clientCommands.group||bot.clientCommands.groups; if(g&&typeof g.acceptGroupInvite==='function')g.acceptGroupInvite(e).catch(er=>console.error('Erro ao aceitar grupo:',er.message||er)); else if(g&&typeof g.acceptInvitation==='function')g.acceptInvitation(e.imSessionID).catch(er=>console.error('Erro ao aceitar grupo:',er.message||er)); else console.error('Comando para aceitar convite não disponível nesta versão.'); return; } const msg=String(e.message||'').trim(); const texto=msg.toLowerCase(); if(cfg.features.allowRlv&&(msg.startsWith('@')||(e.binaryBucket&&e.binaryBucket.toString().includes('@')))){ processarRLV(e,msg,texto); return; } if(texto.includes('maps.secondlife.com/secondlife/')){ if(!cfg.features.allowTeleportLinks||rlvRestricoes.bloquearTeleporte){ bot.clientCommands.comms.sendInstantMessage(e.from,'Teleporte recusado por configuração ou restrição RLV ativa.').catch(()=>{}); return; } if(!isTeleportAdmin(e)){ console.log(`[Segurança] Link de teleporte ignorado de ${e.fromName||e.from||'desconhecido'}.`); bot.clientCommands.comms.sendInstantMessage(e.from,'Teleporte recusado: somente um administrador autorizado pode mover este bot.').catch(()=>{}); return; } processTeleportUrl(msg).catch(er=>console.error('Erro ao teleportar:',er.message||er)); return; } if(isCommand(texto)){ const isMovementCommand = /^(?:!\s*)?(?:tp|teleport|home)(?:\s|$)/i.test(msg); if(isMovementCommand && !isTeleportAdmin(e)){ console.log(`[Segurança] Comando de movimento ignorado de ${e.fromName||e.from||'desconhecido'}.`); bot.clientCommands.comms.sendInstantMessage(e.from,'Comando recusado: somente um administrador autorizado pode mover este bot.').catch(()=>{}); return; } if(!isAllowedAdmin(e)){ bot.clientCommands.comms.sendInstantMessage(e.from,'Você não tem permissão para comandar este bot.').catch(()=>{}); return; } processCommand(msg).then(resp=>bot.clientCommands.comms.sendInstantMessage(e.from,resp)).catch(er=>bot.clientCommands.comms.sendInstantMessage(e.from,er.message||'Erro no comando').catch(()=>{})); } }catch(err){ console.error('Erro ao processar IM:',err.message||err); } });
-  bot.clientEvents.onNearbyChat.subscribe(e=>{ if(botUUID&&e.from.toString()===botUUID)return; const msg=String(e.message||'').trim(); const texto=msg.toLowerCase(); if(cfg.features.allowRlv&&msg.startsWith('@sit:')){ try{ const target=msg.split('sit:')[1].split('=')[0].trim(); bot.clientCommands.movement.sitOnObject(new nmv.UUID(target),new nmv.Vector3([0,0,0])).catch(()=>{}); }catch(_){} return; } if(!isCommand(texto))return; const isMovementCommand=/^(?:!\s*)?(?:tp|teleport|home)(?:\s|$)/i.test(msg); if(isMovementCommand&&!isTeleportAdmin(e)){ console.log(`[Segurança] Comando de movimento local ignorado de ${e.fromName||e.from||'desconhecido'}.`); return; } if(!isAllowedAdmin(e))return; processCommand(msg).then(resp=>bot.clientCommands.comms.say(resp,0)).catch(er=>bot.clientCommands.comms.say(er.message||'Erro no comando',0)); }); 
-}
+    if(rlvRestricoes.bloquearTeleporte){
+      console.log(`[Segurança] Offer Teleport de ${who} recusado por restrição RLV.`);
+      return;
+    }
+    if(!bot.clientCommands||!bot.clientCommands.teleport||typeof bot.clientCommands.teleport.acceptTeleport!=='function'){
+      console.error('[TP Offer] acceptTeleport não está disponível nesta versão do node-metaverse.');
+      return;
+    }
+    marcarJanelaDeTeleporte(`aceitando Offer Teleport de ${who}`,Number(process.env.SL_TELEPORT_GRACE_MS||60000));
+    console.log(`[TP Offer] Convite autorizado de ${who}. Aceitando...`);
+    await bot.clientCommands.teleport.acceptTeleport(lure);
+    console.log(`[TP Offer] Teleporte aceito de ${who}.`);
+  }catch(err){
+    console.error('[TP Offer] Erro ao aceitar Offer Teleport:',err.message||err);
+  }
+ });
+ if(bot.clientEvents.onScriptDialog) bot.clientEvents.onScriptDialog.subscribe(d=>console.log(`[HUD Dialog] ${d.message}`));
+ bot.clientEvents.onInstantMessage.subscribe(e=>{ try{ if(botUUID&&e.from.toString()===botUUID)return; if(e.dialog===InstantMessageDialog.GroupInvitation&&cfg.features.autoAcceptGroups){ console.log(`[Grupo] Convite recebido de ${e.fromName}. Aceitando automaticamente...`); const g=bot.clientCommands.group||bot.clientCommands.groups; if(g&&typeof g.acceptGroupInvite==='function')g.acceptGroupInvite(e).catch(er=>console.error('Erro ao aceitar grupo:',er.message||er)); else if(g&&typeof g.acceptInvitation==='function')g.acceptInvitation(e.imSessionID).catch(er=>console.error('Erro ao aceitar grupo:',er.message||er)); else console.error('Comando para aceitar convite não disponível nesta versão.'); return; } const msg=String(e.message||'').trim(); const texto=msg.toLowerCase(); if(cfg.features.allowRlv&&(msg.startsWith('@')||(e.binaryBucket&&e.binaryBucket.toString().includes('@')))){ processarRLV(e,msg,texto); return; } if(texto.includes('maps.secondlife.com/secondlife/')){ if(!cfg.features.allowTeleportLinks||rlvRestricoes.bloquearTeleporte){ bot.clientCommands.comms.sendInstantMessage(e.from,'Teleporte recusado por configuração ou restrição RLV ativa.').catch(()=>{}); return; } if(!isTeleportAdmin(e)){ console.log(`[Segurança] Link de teleporte ignorado de ${e.fromName||e.from||'desconhecido'}.`); bot.clientCommands.comms.sendInstantMessage(e.from,'Teleporte recusado: somente um administrador autorizado pode mover este bot.').catch(()=>{}); return; } processTeleportUrl(msg).catch(er=>console.error('Erro ao teleportar:',er.message||er)); return; } if(isCommand(texto)){ const isMovementCommand = /^(?:!\s*)?(?:tp|teleport|home)(?:\s|$)/i.test(msg); if(isMovementCommand && !isTeleportAdmin(e)){ console.log(`[Segurança] Comando de movimento ignorado de ${e.fromName||e.from||'desconhecido'}.`); bot.clientCommands.comms.sendInstantMessage(e.from,'Comando recusado: somente um administrador autorizado pode mover este bot.').catch(()=>{}); return; } if(!isAllowedAdmin(e)){ bot.clientCommands.comms.sendInstantMessage(e.from,'Você não tem permissão para comandar este bot.').catch(()=>{}); return; } processCommand(msg).then(resp=>bot.clientCommands.comms.sendInstantMessage(e.from,resp)).catch(er=>bot.clientCommands.comms.sendInstantMessage(e.from,er.message||'Erro no comando').catch(()=>{})); } }catch(err){ console.error('Erro ao processar IM:',err.message||err); } });
+ bot.clientEvents.onNearbyChat.subscribe(e=>{ if(botUUID&&e.from.toString()===botUUID)return; const msg=String(e.message||'').trim(); const texto=msg.toLowerCase(); if(cfg.features.allowRlv&&msg.startsWith('@sit:')){ try{ const target=msg.split('sit:')[1].split('=')[0].trim(); bot.clientCommands.movement.sitOnObject(new nmv.UUID(target),new nmv.Vector3([0,0,0])).catch(()=>{}); }catch(_){} return; } if(!isCommand(texto))return; const isMovementCommand=/^(?:!\s*)?(?:tp|teleport|home)(?:\s|$)/i.test(msg); if(isMovementCommand&&!isTeleportAdmin(e)){ console.log(`[Segurança] Comando de movimento local ignorado de ${e.fromName||e.from||'desconhecido'}.`); return; } if(!isAllowedAdmin(e))return; processCommand(msg).then(resp=>bot.clientCommands.comms.say(resp,0)).catch(er=>bot.clientCommands.comms.say(er.message||'Erro no comando',0)); }); }
 
 function isCommand(t){ return t.startsWith('!')||t==='help'||t==='ajuda'||t.startsWith('sit ')||t==='stand'||t==='status'||t==='home'||t.startsWith('tp ')||t.startsWith('teleport ')||t.startsWith('say ')||t.startsWith('invite ')||t.startsWith('convidar ')||t.startsWith('groupinvite ')||t.startsWith('attach ')||t.startsWith('wear ')||t.startsWith('vestir ')||t.startsWith('detach ')||t.startsWith('tirar ')||t==='sitground'; }
 
@@ -190,46 +185,49 @@ function parseSlurl(raw){ const m=String(raw||'').match(/\/secondlife\/([^\/]+)\
 
 async function processTeleportUrl(raw){ if(rlvRestricoes.bloquearTeleporte)return 'Comando recusado: restrição RLV de teleporte ativa.'; const loc=parseSlurl(raw); marcarJanelaDeTeleporte(`indo para ${loc.region}`,Number(process.env.SL_TELEPORT_GRACE_MS||60000)); if(bot.clientCommands&&bot.clientCommands.teleport&&typeof bot.clientCommands.teleport.teleportTo==='function')await bot.clientCommands.teleport.teleportTo(loc.region,new nmv.Vector3([loc.x,loc.y,loc.z]),new nmv.Vector3([loc.x,loc.y,loc.z])); else if(bot.client&&bot.client.self)bot.client.self.teleport(loc.region,new nmv.Vector3([loc.x,loc.y,loc.z])); return `Iniciando teleporte para: ${loc.region} (${loc.x}, ${loc.y}, ${loc.z})`; }
 
-// Função goHomeFromConfig com sincronização de evento de entrada na região
 async function goHomeFromConfig(){
-  try{
-    if(!cfg.home||!cfg.home.url){
+  try {
+    if (!cfg.home || !cfg.home.url) {
       console.log('[Home] URL da ilha não configurada.');
       return 'URL da ilha não configurada.';
     }
 
-    const objUUIDStr = String(cfg.home.objectUUID || '').trim();
-    const doAutoSit = Boolean(cfg.home.autoSit && objUUIDStr);
+    const msg = await processTeleportUrl(cfg.home.url);
+    console.log('[Home] ' + msg);
 
-    if (doAutoSit && bot.clientEvents) {
+    const objUUIDStr = String(cfg.home && cfg.home.objectUUID ? cfg.home.objectUUID : '').trim();
+    const doAutoSit = Boolean(cfg.home && cfg.home.autoSit && objUUIDStr);
+
+    if (doAutoSit) {
       const tentarSit = () => {
+        // Pausa de 4 segundos após entrar na região para dar tempo dos objetos locais carregarem no cliente do bot
         setTimeout(() => {
           try {
-            console.log(`[Home] Executando sit no objeto: ${objUUIDStr}`);
+            console.log(`[Home] A tentar sentar no objeto UUID: ${objUUIDStr}`);
             bot.clientCommands.movement.sitOnObject(
               new nmv.UUID(objUUIDStr),
               new nmv.Vector3([0, 0, 0])
-            ).then(() => console.log('[Home] Sentar no objeto enviado com sucesso.'))
-             .catch(er => console.error('[Home] Erro no sitOnObject:', er.message || er));
+            )
+            .then(() => console.log('[Home] Comando de sentar enviado com sucesso!'))
+            .catch(er => console.error('[Home] Erro do simulador ao tentar sentar:', er.message || er));
           } catch (er) {
-            console.error('[Home] Erro ao instanciar UUID para sit:', er.message || er);
+            console.error('[Home] UUID do objeto em formato inválido:', er.message || er);
           }
-        }, 3000);
+        }, 4000);
       };
 
-      if (bot.clientEvents.onRegionCrossed && typeof bot.clientEvents.onRegionCrossed.subscribeOnce === 'function') {
+      // Tenta acionar o sit assim que a transferência de região for concluída
+      if (bot.clientEvents && bot.clientEvents.onRegionCrossed && typeof bot.clientEvents.onRegionCrossed.subscribeOnce === 'function') {
         bot.clientEvents.onRegionCrossed.subscribeOnce(() => tentarSit());
-      } else if (bot.clientEvents.onRegionCrossed) {
-        bot.clientEvents.onRegionCrossed.subscribe(() => tentarSit());
       } else {
-        setTimeout(tentarSit, Number(process.env.HOME_SIT_DELAY_MS || 10000));
+        setTimeout(tentarSit, Number(process.env.HOME_SIT_DELAY_MS || 8000));
       }
+
+      return msg + ' Aguardando chegada na região para sentar no objeto.';
     }
 
-    const msg = await processTeleportUrl(cfg.home.url);
-    console.log('[Home] ' + msg);
-    return msg + (doAutoSit ? ' Agendado o sit após concluir o carregamento da região.' : '');
-  } catch(err){
+    return msg;
+  } catch(err) {
     console.error('[Home] Erro:', err.message || err);
     return 'Erro no home: ' + (err.message || err);
   }
