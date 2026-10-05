@@ -114,6 +114,10 @@ function iniciarConexaoBot(){ if(shuttingDown)return; slOnline=false; notifyPare
  if(primeiraConexao&&cfg.home&&cfg.home.autoGoHome&&!autoHomeUsed){
    autoHomeUsed=true;
    await goHomeFromConfig();
+ } else if(primeiraConexao&&cfg.home&&cfg.home.autoSit&&cfg.home.objectUUID){
+   // Auto Sit também funciona quando o bot já inicia na região configurada,
+   // sem exigir Auto Go Home.
+   agendarAutoSitNaRegiao();
  }
 }).catch(err=>{ console.error('Erro detectado no login ou conexão:',err.message||err); agendarReconexao('erro no login ou conexão: '+(err.message||err),hasConnectedOnce?Number(cfg.features.regionRecoveryMs||process.env.SL_REGION_RECOVERY_DELAY_MS||90000):Number(cfg.features.reconnectMs||15000)); }); }
 function configurarRotinasAutomaticas(){ limparRotinasAutomaticas(); if(cfg.features.localAnnouncementEnabled){ intervaloAnuncio=setInterval(()=>{ if(bot.clientCommands&&bot.clientCommands.comms){ bot.clientCommands.comms.say(cfg.features.announcementMessage,0); console.log('[Anúncio] Mensagem automática enviada no chat local.'); } },Number(cfg.features.announcementMinutes||15)*60*1000); }
@@ -153,7 +157,36 @@ async function findInventoryItem(nameOrUUID){ const inv=await bot.clientCommands
 function parseAttachmentPoint(value){ const norm=value.toLowerCase().replace(/[^a-z0-9]/g,''); for(const key of Object.keys(AttachmentPoint).filter(k=>Number.isNaN(Number(k)))){ if(key.toLowerCase().replace(/[^a-z0-9]/g,'')===norm)return AttachmentPoint[key]; } throw new Error(`attachment point inválido: ${value}`); }
 function parseSlurl(raw){ const m=String(raw||'').match(/\/secondlife\/([^\/]+)\/([0-9.]+)\/([0-9.]+)\/([0-9.]+)/i); if(!m)throw new Error('envie o link maps.secondlife.com/secondlife/Regiao/X/Y/Z'); return { region:decodeURIComponent(m[1]), x:parseFloat(m[2]), y:parseFloat(m[3]), z:parseFloat(m[4]) }; }
 async function processTeleportUrl(raw){ if(rlvRestricoes.bloquearTeleporte)return 'Comando recusado: restrição RLV de teleporte ativa.'; const loc=parseSlurl(raw); marcarJanelaDeTeleporte(`indo para ${loc.region}`,Number(process.env.SL_TELEPORT_GRACE_MS||60000)); if(bot.clientCommands&&bot.clientCommands.teleport&&typeof bot.clientCommands.teleport.teleportTo==='function')await bot.clientCommands.teleport.teleportTo(loc.region,new nmv.Vector3([loc.x,loc.y,loc.z]),new nmv.Vector3([loc.x,loc.y,loc.z])); else if(bot.client&&bot.client.self)bot.client.self.teleport(loc.region,new nmv.Vector3([loc.x,loc.y,loc.z])); return `Iniciando teleporte para: ${loc.region} (${loc.x}, ${loc.y}, ${loc.z})`; }
-async function goHomeFromConfig(){ try{ if(!cfg.home||!cfg.home.url){ console.log('[Home] URL da ilha não configurada.'); return 'URL da ilha não configurada.'; } const msg=await processTeleportUrl(cfg.home.url); console.log('[Home] '+msg); const obj=String(cfg.home.objectUUID||'').trim(); if(cfg.home.autoSit&&obj){ const targetRegion=parseSlurl(cfg.home.url).region; const delay=Number(process.env.HOME_SIT_DELAY_MS||8000); let tentativas=0; const tentarSentar=()=>{ tentativas++; const atual=currentRegionName(); if(atual.toLowerCase()!==targetRegion.toLowerCase()){ if(tentativas<21){ setTimeout(tentarSentar,3000); } else { console.error(`[Home] Região alvo não detectada após ${tentativas-1} tentativas: ${targetRegion}`); } return; } bot.clientCommands.movement.sitOnObject(new nmv.UUID(obj),new nmv.Vector3([0,0,0])).then(()=>console.log(`[Home] Sentado no objeto ${obj}.`)).catch(er=>{ console.error('[Home] Erro ao sentar:',er.message||er); if(tentativas<21)setTimeout(tentarSentar,3000); }); }; setTimeout(tentarSentar,delay); return msg+' Aguardando chegar na região para sentar no objeto configurado.'; } return msg; }catch(err){ console.error('[Home] Erro:',err.message||err); return 'Erro no home: '+(err.message||err); } }
+function agendarAutoSitNaRegiao(){
+ const obj=String(cfg&&cfg.home&&cfg.home.objectUUID||'').trim();
+ const url=String(cfg&&cfg.home&&cfg.home.url||'').trim();
+ if(!obj||!url)return;
+ let targetRegion;
+ try{ targetRegion=parseSlurl(url).region; }catch(e){ console.error('[Auto Sit] URL Home inválida:',e.message||e); return; }
+ let tentativas=0;
+ const maxTentativas=40;
+ const tentar=()=>{
+   if(!slOnline||!bot||!bot.clientCommands||!bot.clientCommands.movement||typeof bot.clientCommands.movement.sitOnObject!=='function')return;
+   tentativas++;
+   const atual=currentRegionName();
+   if(atual.toLowerCase()!==targetRegion.toLowerCase()){
+     if(tentativas<maxTentativas)setTimeout(tentar,3000);
+     else console.error(`[Auto Sit] Região atual "${atual}" diferente da região alvo "${targetRegion}".`);
+     return;
+   }
+   console.log(`[Auto Sit] Região ${atual} detectada. Tentando sentar no objeto ${obj} (tentativa ${tentativas}/${maxTentativas})...`);
+   try{
+     Promise.resolve(bot.clientCommands.movement.sitOnObject(new nmv.UUID(obj),new nmv.Vector3([0,0,0])))
+       .then(()=>console.log(`[Auto Sit] Comando enviado para o objeto ${obj}.`))
+       .catch(er=>{ console.error('[Auto Sit] Erro ao sentar:',er.message||er); if(tentativas<maxTentativas)setTimeout(tentar,3000); });
+   }catch(er){
+     console.error('[Auto Sit] Erro ao chamar sitOnObject:',er.message||er);
+     if(tentativas<maxTentativas)setTimeout(tentar,3000);
+   }
+ };
+ setTimeout(tentar,Number(process.env.HOME_SIT_DELAY_MS||10000));
+}
+async function goHomeFromConfig(){ try{ if(!cfg.home||!cfg.home.url){ console.log('[Home] URL da ilha não configurada.'); return 'URL da ilha não configurada.'; } const msg=await processTeleportUrl(cfg.home.url); console.log('[Home] '+msg); if(cfg.home.autoSit&&cfg.home.objectUUID)agendarAutoSitNaRegiao(); return msg+' Aguardando chegar na região para sentar no objeto configurado.'; }catch(err){ console.error('[Home] Erro:',err.message||err); return 'Erro no home: '+(err.message||err); } }
 async function processCommand(message){ let text=message.trim(); if(text.startsWith('!'))text=text.slice(1).trim(); if(text.length===0)return 'comando vazio'; const pieces=text.includes('|')?text.split('|'):text.split(/\s+/); const command=(pieces.shift()||'').trim().toLowerCase(); const args=pieces.map(i=>i.trim()).filter(Boolean); switch(command){ case 'help':case 'ajuda':return '!status | !home | !tp LINK | !invite AVATAR_UUID [GRUPO_UUID] [ROLE_UUID] | !sit UUID | !stand | !sitground | !say [canal] texto | !attach item ponto | !detach item'; case 'status':return `online. bot=${BOT_ID}. região=${(bot.currentRegion&&bot.currentRegion.regionName)||'desconhecida'}. RLV_TP=${rlvRestricoes.bloquearTeleporte?'Bloqueado':'Livre'}`; case 'home':return await goHomeFromConfig(); case 'tp':case 'teleport':if(!args.length)throw new Error('Link ausente'); return await processTeleportUrl(args.join(' ')); case 'sit':case 'sentar':if(!args.length||args[0].length<32)throw new Error('uso: !sit UUID'); await bot.clientCommands.movement.sitOnObject(new nmv.UUID(args[0]),new nmv.Vector3([0,0,0])); return `Comando sit enviado para ${args[0]}`; case 'stand':case 'levantar':bot.clientCommands.movement.stand(); return 'stand enviado'; case 'sitground':bot.clientCommands.movement.sitOnGround(); return 'sit ground enviado'; case 'invite':case 'convidar':case 'groupinvite':if(!args.length)throw new Error('Uso: !invite AVATAR_UUID [GRUPO_UUID] [ROLE_UUID]'); return await sendGroupInviteFromConfig({avatarID:args[0],groupID:args[1],roleID:args[2]}); case 'say':case 'falar':{ if(!args.length)throw new Error('Texto ausente'); let channel=0, sayText=args.join(' '); if(args.length>=2&&/^-?\d+$/.test(args[0])){ channel=Number.parseInt(args[0],10); sayText=args.slice(1).join(' '); } await bot.clientCommands.comms.say(sayText,channel); return `chat enviado no canal ${channel}`;} case 'attach':case 'wear':case 'vestir':{ if(!args.length)throw new Error('Uso: !attach nomeDoItem [AttachmentPoint]'); const item=await findInventoryItem(args[0]); await item.attachToAvatar(parseAttachmentPoint(args[1]||'Default')); return `attach enviado: ${item.name}`;} case 'detach':case 'tirar':{ if(!args.length)throw new Error('Uso: !detach nomeDoItem'); const item=await findInventoryItem(args[0]); await item.detachFromAvatar(); return `detach enviado: ${item.name}`;} default:throw new Error(`comando desconhecido: ${command}. use !help`); } }
 async function boot(){ if(!BOT_ID)throw new Error('BOT_ID ausente. Inicie pelo Agent.'); cfg=loadRuntimeConfig(); if(!cfg)throw new Error(`Configuração do bot ${BOT_ID} ausente.`); validarCredenciais(); loginParameters=makeLoginParameters(true); bot=new nmv.Bot(loginParameters,options); iniciarConexaoBot(); }
 boot().catch(err=>{ console.error('Erro ao iniciar bot:',err.message||err); process.exit(1); });
